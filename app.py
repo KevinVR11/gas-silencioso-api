@@ -1,82 +1,100 @@
 from flask import Flask, request, jsonify
-from tensorflow.keras.models import load_model
-from tensorflow.keras.losses import MeanSquaredError, BinaryCrossentropy
-from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
 import numpy as np
+import pandas as pd
 import requests
+import joblib
+from tensorflow.keras.models import load_model
+from tensorflow.keras.losses import MeanSquaredError
+from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
 import os
 
 app = Flask(__name__)
 
-# Cargar modelo
-modelo = load_model("modelo_gas_completo.h5", compile=False)
-modelo.compile(loss={'demanda': MeanSquaredError(), 'urgencia': BinaryCrossentropy()})
+# Cargar modelo y preprocesadores
+# modelo = load_model("modelo_gas_entrenado.h5")
+modelo = load_model("modelo_gas_entrenado.h5", compile=False)
+modelo.compile(loss=MeanSquaredError())
+encoder = joblib.load("encoder.pkl")
+scaler = joblib.load("scaler.pkl")
 
-# Definir categorías posibles para que el encoder tenga la misma estructura
-encoder = OneHotEncoder(sparse_output=False, drop='first', handle_unknown='ignore')
-categorias = [
-    ['0', '1', '2', '3', '4', '5', '6'],  # dia_semana
-    ['0', '1'],                           # es_laboral
-    ['0', '1']                            # demanda_comercial
-]
-encoder.fit(np.array(np.meshgrid(*categorias)).T.reshape(-1, 3))
+# Diccionario de altitud por sector (puedes ajustar estos valores)
+ALTITUDES = {
+    "Calderón": 2850,
+    "Carapungo": 2840,
+    "La Ofelia": 2860,
+    "Cotocollao": 2870,
+    "El Condado": 2880
+}
 
-# Dummy scaler fit (importante que tenga 14 columnas)
-scaler = MinMaxScaler()
-scaler.fit(np.random.rand(10, 14))  # reemplaza esto con scaler real si lo tienes
-
-# 🔑 Tu clave de WeatherAPI
+# Token de WeatherAPI
 WEATHER_API_KEY = "cd1b592c33c84a1c97a150918251806"
-CIUDAD = "Quito"
-ALTITUD_ESTIMADA = 2850
 
-def obtener_datos_climaticos():
-    try:
-        url = f"https://api.weatherapi.com/v1/current.json?q={CIUDAD}&lang=es&key={WEATHER_API_KEY}"
-        response = requests.get(url)
-        data = response.json()
-
-        temperatura = data["current"]["temp_c"]
-        humedad = data["current"]["humidity"] / 100.0  # de 0 a 1
-        presion = data["current"]["pressure_mb"] / 1000.0  # de mb a atm aprox
-
-        return temperatura, humedad, presion
-    except Exception as e:
-        raise RuntimeError(f"Error al obtener clima: {str(e)}")
-
-@app.route("/predict", methods=["POST"])
-def predict():
+@app.route("/predecir", methods=["POST"])
+def predecir():
     try:
         data = request.get_json()
-        campos = ["hora_dia", "stock", "dia_semana", "es_laboral", "demanda_comercial"]
-        if not all(k in data for k in campos):
+        campos_requeridos = ["sector", "hora_dia", "stock_actual", "dia_semana", "es_laboral", "demanda_comercial"]
+
+        if not all(k in data for k in campos_requeridos):
             return jsonify({"error": "Faltan campos en el JSON"}), 400
 
-        # Obtener clima y altitud automáticamente
-        temperatura, humedad, presion = obtener_datos_climaticos()
-        altitud = ALTITUD_ESTIMADA
+        # Datos base del usuario
+        sector = data["sector"]
+        if sector not in ALTITUDES:
+            return jsonify({"error": f"Sector no reconocido: {sector}"}), 400
 
-        # Variables numéricas
-        X_num = np.array([[temperatura, data["hora_dia"], altitud,
-                           data["stock"], humedad, presion]])
+        hora_dia = data["hora_dia"]
+        stock_actual = data["stock_actual"]
+        dia_semana = data["dia_semana"]
+        es_laboral = data["es_laboral"]
+        demanda_comercial = data["demanda_comercial"]
+        altitud = ALTITUDES[sector]
 
-        # Variables categóricas
-        X_cat = np.array([[str(data["dia_semana"]), str(data["es_laboral"]), str(data["demanda_comercial"])]])
-        X_cat_encoded = encoder.transform(X_cat)
+        # Consulta a WeatherAPI
+        url = f"https://api.weatherapi.com/v1/current.json?q=Quito&lang=es&key={WEATHER_API_KEY}"
+        r = requests.get(url)
+        clima = r.json()
+        temperatura = clima["current"]["temp_c"]
+        humedad = clima["current"]["humidity"] / 100
+        presion = clima["current"]["pressure_mb"] / 1013.25
 
-        # Concatenar y escalar
-        X_input = np.hstack([X_num, X_cat_encoded])
-        X_scaled = scaler.transform(X_input)
+        # Preparar input
+        df_input = pd.DataFrame([{
+            "sector": sector,
+            "hora_dia": hora_dia,
+            "dia_semana": dia_semana,
+            "es_laboral": es_laboral,
+            "demanda_comercial": demanda_comercial,
+            "temperatura": temperatura,
+            "humedad": humedad,
+            "presion": presion,
+            "altitud": altitud,
+            "stock_actual": stock_actual
+        }])
+
+        # Codificar sector
+        X_cat = encoder.transform(df_input[["sector"]])
+        df_input = df_input.drop(columns=["sector"])
+        X_num = df_input.values
+        X = np.hstack([X_num, X_cat])
+
+        # Escalar
+        X_scaled = scaler.transform(X)
 
         # Predicción
-        pred = modelo.predict(X_scaled)
-        demanda_pred = pred[0]
-        urgencia_pred = pred[1]
+        y_pred = modelo.predict(X_scaled)
+        cilindros_predichos = float(y_pred[0][0])
+        tiempo_estimado = float(y_pred[0][1])
+        urgencia_prob = float(y_pred[0][1])
+
+        # Lógica de urgencia
+        es_urgente = int((cilindros_predichos > 70) and (tiempo_estimado < 4.8) and (int(demanda_comercial) == 1))
+        estado_urgencia = "Urgente" if es_urgente == 1 else "Normal"
 
         return jsonify({
-            "prediccion_demanda": float(demanda_pred[0][0]),
-            "prediccion_urgencia": "URGENTE" if urgencia_pred[0][0] > 0.5 else "NORMAL",
-            "probabilidad_urgencia": float(urgencia_pred[0][0])
+            "prediccion_cilindros": int(cilindros_predichos),
+            "prediccion_urgencia": estado_urgencia,
+            "probabilidad_urgencia": round(urgencia_prob, 3)
         })
 
     except Exception as e:
