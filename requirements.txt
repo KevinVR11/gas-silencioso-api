@@ -3,3 +3,5 @@ tensorflow==2.19.0
 numpy
 scikit-learn
 requests
+joblib
+pandas
