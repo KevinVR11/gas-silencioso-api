@@ -3,6 +3,7 @@ from tensorflow.keras.models import load_model
 from tensorflow.keras.losses import MeanSquaredError, BinaryCrossentropy
 from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
 import numpy as np
+import os
 
 app = Flask(__name__)
 
