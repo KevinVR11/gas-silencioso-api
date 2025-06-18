@@ -3,6 +3,7 @@ from tensorflow.keras.models import load_model
 from tensorflow.keras.losses import MeanSquaredError, BinaryCrossentropy
 from sklearn.preprocessing import OneHotEncoder, MinMaxScaler
 import numpy as np
+import requests
 import os
 
 app = Flask(__name__)
@@ -24,18 +25,40 @@ encoder.fit(np.array(np.meshgrid(*categorias)).T.reshape(-1, 3))
 scaler = MinMaxScaler()
 scaler.fit(np.random.rand(10, 14))  # reemplaza esto con scaler real si lo tienes
 
+# 🔑 Tu clave de WeatherAPI
+WEATHER_API_KEY = "cd1b592c33c84a1c97a150918251806"
+CIUDAD = "Quito"
+ALTITUD_ESTIMADA = 2850
+
+def obtener_datos_climaticos():
+    try:
+        url = f"https://api.weatherapi.com/v1/current.json?q={CIUDAD}&lang=es&key={WEATHER_API_KEY}"
+        response = requests.get(url)
+        data = response.json()
+
+        temperatura = data["current"]["temp_c"]
+        humedad = data["current"]["humidity"] / 100.0  # de 0 a 1
+        presion = data["current"]["pressure_mb"] / 1000.0  # de mb a atm aprox
+
+        return temperatura, humedad, presion
+    except Exception as e:
+        raise RuntimeError(f"Error al obtener clima: {str(e)}")
+
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
         data = request.get_json()
-        campos = ["temperatura", "hora_dia", "altitud", "stock", "humedad", "presion",
-                  "dia_semana", "es_laboral", "demanda_comercial"]
+        campos = ["hora_dia", "stock", "dia_semana", "es_laboral", "demanda_comercial"]
         if not all(k in data for k in campos):
             return jsonify({"error": "Faltan campos en el JSON"}), 400
 
+        # Obtener clima y altitud automáticamente
+        temperatura, humedad, presion = obtener_datos_climaticos()
+        altitud = ALTITUD_ESTIMADA
+
         # Variables numéricas
-        X_num = np.array([[data["temperatura"], data["hora_dia"], data["altitud"],
-                           data["stock"], data["humedad"], data["presion"]]])
+        X_num = np.array([[temperatura, data["hora_dia"], altitud,
+                           data["stock"], humedad, presion]])
 
         # Variables categóricas
         X_cat = np.array([[str(data["dia_semana"]), str(data["es_laboral"]), str(data["demanda_comercial"])]])
